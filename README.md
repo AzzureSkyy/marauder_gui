@@ -1,5 +1,5 @@
 
-
+![IoT Mug Logo](https://www.iotmug.com/images/thumbs/0000644_iot-logo-2-removebg-preview%20(1).png)
 
 # Marauder GUI
 
