@@ -7,7 +7,8 @@ enum {
     WifiSpamEventStop,
 };
 
-#define WIFI_SPAM_BATCH_MAX 8192
+/* Pause between individual "ssid -a -n" commands so the ESP32 UART buffer isn't overrun */
+#define WIFI_SPAM_SSID_GAP_MS 20
 
 /* "attack -t beacon -r/funny" - fake-AP beacon spam types that need no target
    selection (unlike "attack -t beacon -a", which spams using the currently selected APs, or
@@ -96,14 +97,15 @@ static void marauder_gui_scene_wifi_spam_uart_line(MarauderGuiApp* app, const ch
     marauder_gui_scene_wifi_spam_redraw(app);
 }
 
-static void marauder_gui_scene_wifi_spam_send_batch(
-    MarauderGuiApp* app,
-    const char* ssids,
-    int total_count) {
-    static char cmd[WIFI_SPAM_BATCH_MAX + 16];
-    snprintf(cmd, sizeof(cmd), "ssid -a -s %s", ssids);
+/* ESP32 Marauder's "ssid -a" accepts one name per command ("-n <name>"). Quotes keep names
+   containing spaces together through the firmware's argument tokenizer. */
+static void marauder_gui_scene_wifi_spam_send_ssid(MarauderGuiApp* app, const char* ssid) {
+    static char cmd[256 + 16];
+    snprintf(cmd, sizeof(cmd), "ssid -a -n \"%s\"", ssid);
     marauder_uart_send_line(app->uart, cmd);
+}
 
+static void marauder_gui_scene_wifi_spam_show_progress(MarauderGuiApp* app, int total_count) {
     snprintf(
         app->wifi_spam_status_label,
         sizeof(app->wifi_spam_status_label),
@@ -140,10 +142,8 @@ void marauder_gui_scene_wifi_spam_on_enter(void* context) {
             return;
         }
 
-        /* Read all SSIDs from file, batching them */
+        /* Stream SSIDs from file one line at a time, pausing after each batch */
         static char line_buffer[256];
-        static char batch_ssids[WIFI_SPAM_BATCH_MAX];
-        batch_ssids[0] = '\0';
         int batch_count = 0;
         int total_count = 0;
         int batch_size = app->wifi_spam_count;  /* Use the input as batch size */
@@ -160,34 +160,17 @@ void marauder_gui_scene_wifi_spam_on_enter(void* context) {
                 if(line_pos > 0) {
                     line_buffer[line_pos] = '\0';
 
-                    /* Skip empty lines */
-                    if(strlen(line_buffer) > 0) {
-                        /* Flush early if this SSID would overflow the batch buffer */
-                        if(batch_count > 0 &&
-                           strlen(batch_ssids) + 1 + strlen(line_buffer) >= sizeof(batch_ssids)) {
-                            marauder_gui_scene_wifi_spam_send_batch(app, batch_ssids, total_count);
-                            batch_ssids[0] = '\0';
-                            batch_count = 0;
-                            furi_delay_ms(100);
-                        }
-
-                        /* Add SSID to current batch */
-                        if(batch_count > 0) {
-                            strlcat(batch_ssids, " ", sizeof(batch_ssids));
-                        }
-                        strlcat(batch_ssids, line_buffer, sizeof(batch_ssids));
-                        batch_count++;
+                    /* Skip empty lines and names with '"', which can't be quoted in the command */
+                    if(strlen(line_buffer) > 0 && strchr(line_buffer, '"') == NULL) {
+                        marauder_gui_scene_wifi_spam_send_ssid(app, line_buffer);
                         total_count++;
+                        batch_count++;
+                        furi_delay_ms(WIFI_SPAM_SSID_GAP_MS);
 
-                        /* When batch is full, send it and reset */
+                        /* After each full batch, update progress and pause briefly */
                         if(batch_count >= batch_size) {
-                            marauder_gui_scene_wifi_spam_send_batch(app, batch_ssids, total_count);
-
-                            /* Reset batch */
-                            batch_ssids[0] = '\0';
+                            marauder_gui_scene_wifi_spam_show_progress(app, total_count);
                             batch_count = 0;
-
-                            /* Small delay between batches to prevent buffer overflow */
                             furi_delay_ms(100);
                         }
                     }
@@ -200,11 +183,6 @@ void marauder_gui_scene_wifi_spam_on_enter(void* context) {
                 }
             }
             if(eof) break;
-        }
-
-        /* Send remaining SSIDs if any */
-        if(batch_count > 0) {
-            marauder_gui_scene_wifi_spam_send_batch(app, batch_ssids, total_count);
         }
 
         storage_file_close(file);

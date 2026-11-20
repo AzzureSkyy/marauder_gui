@@ -37,8 +37,7 @@ Compared with v1.1 in `docs/changelog.md`:
 - **Removed the fake AP option.** The separate "Custom SSID File" menu item is gone. The Wi-Fi spam
   menu now lists only Random SSID and Funny Names.
 - **Random SSID loads a custom SSID list.** It reads `ssids.txt` from the SD card. The file can be
-  any size. Entries are sent in batches (see "Custom SSID list"), so the ESP32 is not flooded with
-  one huge command.
+  any size. Names are sent one at a time in paced batches (see "Custom SSID list").
 - **Evil Portal HTML selection.** After choosing an AP, you pick the portal page: "Default
   (Tester)" (the built-in email-login page) or any `.html`/`.htm` file in the `html` folder.
   The built-in page is still the default and is unchanged.
@@ -54,13 +53,12 @@ apps_data/marauder_gui/ssids.txt
 - One SSID per line.
 - The last line may or may not end with a newline.
 - Blank lines are skipped.
-- Do not use SSIDs that contain spaces. The batch command separates names with spaces, so an
-  SSID with spaces will be split into several names.
+- SSIDs may contain spaces. Lines containing a double quote (") are skipped.
 
 Start it from **WiFi > WiFi Spam > Random SSID**. Enter a batch size from 1 to 500. The app sends
-that many SSIDs per `ssid -a -s` command, pauses 100 ms, then sends the next batch. Each batch is
-also capped at 8192 bytes. When the whole file has been sent, the beacon attack starts with
-`attack -t beacon -l`.
+each SSID as its own `ssid -a -n "<name>"` command, which is the form the ESP32 Marauder firmware
+accepts. It pauses 20 ms between names and 100 ms after each batch. When the whole file has been
+sent, the beacon attack starts with `attack -t beacon -l`.
 
 Funny Names remains in the same menu and is unchanged.
 
@@ -83,8 +81,8 @@ file cannot be opened, the app falls back to the built-in page.
 
 - These changes are built and checked on the firmware side. They have not yet been tested on a
   Flipper Zero against a live ESP32 Marauder. Test with a small `ssids.txt` first.
-- The ESP32 Marauder firmware must accept the batch size and line length used by the app.
-- SSIDs with spaces are not supported by the batch format.
+- Very large lists depend on how many SSIDs the ESP32 Marauder firmware can hold in memory. A
+  2,800-line list has not been tested on hardware.
 
 ## Installation
 
