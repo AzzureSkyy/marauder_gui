@@ -184,7 +184,6 @@ static MarauderGuiApp* marauder_gui_app_alloc(void) {
 
     storage_common_mkdir(app->storage, MARAUDER_GUI_DATA_DIR);
     storage_common_mkdir(app->storage, MARAUDER_GUI_DATA_DIR "/html");
-    storage_common_mkdir(app->storage, MARAUDER_GUI_DATA_DIR "/ssids");
 
     app->gui = furi_record_open(RECORD_GUI);
 
