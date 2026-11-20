@@ -1,5 +1,7 @@
 # Marauder GUI
 
+Maurauder GUI working on this firmware esp32_marauder_v1_20_0_20261028_esp32c5devkitc1.bin for the custom tweaks made.
+
 Marauder GUI is a bilingual Flipper Zero companion application for controlling an ESP32 Marauder
 board over GPIO UART. It provides structured menus for the Marauder serial CLI, so commands do not
 need to be typed manually.
