@@ -17,7 +17,7 @@ void marauder_gui_scene_wifi_spam_count_on_enter(void* context) {
         app->wifi_spam_count = WIFI_SPAM_COUNT_DEFAULT;
     }
 
-    number_input_set_header_text(app->number_input, marauder_gui_text(app, "Batch boyutu?", "Batch size?"));
+    number_input_set_header_text(app->number_input, marauder_gui_text(app, "Pencere boyutu?", "Window size?"));
     number_input_set_result_callback(
         app->number_input,
         marauder_gui_scene_wifi_spam_count_input_callback,

@@ -36,8 +36,9 @@ Compared with v1.1 in `docs/changelog.md`:
 - **Removed Rick Roll** from the Wi-Fi spam types and from the Wi-Fi menu description.
 - **Removed the fake AP option.** The separate "Custom SSID File" menu item is gone. The Wi-Fi spam
   menu now lists only Random SSID and Funny Names.
-- **Random SSID loads a custom SSID list.** It reads `ssids.txt` from the SD card. The file can be
-  any size. Names are sent one at a time in paced batches (see "Custom SSID list").
+- **Random SSID loads a custom SSID list and rotates through it in safe-sized windows.** It reads
+  `ssids.txt` from the SD card. The file can be any size - it is never loaded into memory at
+  once. See "Custom SSID list" for how the rotation works.
 - **Evil Portal HTML selection.** After choosing an AP, you pick the portal page: "Default
   (Tester)" (the built-in email-login page) or any `.html`/`.htm` file in the `html` folder.
   The built-in page is still the default and is unchanged.
@@ -55,10 +56,28 @@ apps_data/marauder_gui/ssids.txt
 - Blank lines are skipped.
 - SSIDs may contain spaces. Lines containing a double quote (") are skipped.
 
-The file is read in 512-byte chunks, so its size does not need to fit in memory. Start it from **WiFi > WiFi Spam > Random SSID**. Enter a batch size from 1 to 500. The app sends
-each SSID as its own `ssid -a -n "<name>"` command, which is the form the ESP32 Marauder firmware
-accepts. It pauses 20 ms between names and 100 ms after each batch. When the whole file has been
-sent, the beacon attack starts with `attack -t beacon -l`.
+Start it from **WiFi > WiFi Spam > Random SSID**. Enter a window size from 1 to 500 (also capped
+at 500 internally for safety, regardless of what is entered - see below).
+
+The app then loops through the file in rounds, each round:
+
+1. Reads the next window's worth of SSIDs (up to the window size) from wherever the file left off,
+   reading in 512-byte chunks so the file's size never has to fit in memory.
+2. Sends each one as its own `ssid -a -n "<name>"` command (the only syntax the ESP32 Marauder
+   firmware accepts), a few lines per 100ms tick so the UI and Stop button stay responsive.
+3. Sends `select -s all` to mark the newly added names, since `ssid -a` leaves them unselected and
+   `attack -t beacon -l` only broadcasts selected entries.
+4. Starts `attack -t beacon -l` and leaves the window broadcasting for 20 seconds.
+5. Stops the attack, clears the ESP32's list (`clearlist -s`), and moves on to the next window.
+
+When the end of the file is reached, it wraps back around to the start, so the whole list keeps
+cycling for as long as the scene is open. This is the "periodically clears and rebroadcasts"
+behavior from earlier builds, done safely in bounded pieces instead of one big batch.
+
+**Safety cap:** ESP32 Marauder's firmware starts refusing new SSIDs once its free heap drops too
+low, which on hardware showed up as the list silently stopping growing somewhere around ~1000-1100
+entries. The app never loads more than 500 SSIDs onto the board at once, regardless of the window
+size entered, to stay well clear of that limit no matter how large ssids.txt is.
 
 Funny Names remains in the same menu and is unchanged.
 
@@ -81,8 +100,7 @@ file cannot be opened, the app falls back to the built-in page.
 
 - These changes are built and checked on the firmware side. They have not yet been tested on a
   Flipper Zero against a live ESP32 Marauder. Test with a small `ssids.txt` first.
-- Very large lists depend on how many SSIDs the ESP32 Marauder firmware can hold in memory. A
-  2,800-line list has not been tested on hardware.
+- The 20-second rotation and 500-SSID safety cap are fixed values, not user-configurable yet.
 
 ## Installation
 

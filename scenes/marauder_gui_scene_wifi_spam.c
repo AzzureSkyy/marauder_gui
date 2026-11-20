@@ -7,9 +7,6 @@ enum {
     WifiSpamEventStop,
 };
 
-/* Pause between individual "ssid -a -n" commands so the ESP32 UART buffer isn't overrun */
-#define WIFI_SPAM_SSID_GAP_MS 20
-
 /* "attack -t beacon -r/funny" - fake-AP beacon spam types that need no target
    selection (unlike "attack -t beacon -a", which spams using the currently selected APs, or
    "-l", which needs an SSID list loaded first via the "ssid" command - both skipped for now).
@@ -66,6 +63,62 @@ const char* marauder_gui_wifi_spam_type_description_en(size_t index) {
                "?";
 }
 
+/* ESP32 Marauder's free-heap guard (MemoryGuard.h) starts rejecting new SSID adds somewhere
+   around ~1000-1100 entries loaded at once (observed on hardware as the board going silent after
+   roughly 1024 names). Keep each loaded window safely below that regardless of what the user
+   picks in the batch-size prompt, which already caps at 500. */
+#define WIFI_SPAM_SAFE_WINDOW_MAX 500
+
+/* How long each window stays on air before the loader clears it and loads the next slice of the
+   file. Matches the old "periodically garbles then rebroadcasts" behavior the user described,
+   and is what lets a file of any size be cycled through in safe-sized pieces instead of needing
+   to fit entirely in the ESP32's list at once. Must be a multiple of the app's 100ms tick. */
+#define WIFI_SPAM_ROTATE_MS     20000
+#define WIFI_SPAM_ROTATE_TICKS  (WIFI_SPAM_ROTATE_MS / 100)
+
+/* How many ssids.txt lines the loader reads and sends per 100ms tick while filling a window.
+   Keeps every tick short (a handful of quick UART writes) so the UI, the Stop button, and Back
+   all stay responsive instead of the whole window being sent in one blocking burst. */
+#define WIFI_SPAM_LINES_PER_TICK 8
+
+typedef enum {
+    WifiSpamLoadIdle = 0,
+    WifiSpamLoadSkipping, /* re-reading from the top of the file past windows already sent this pass */
+    WifiSpamLoadLoading, /* reading+sending the next window's worth of SSIDs */
+    WifiSpamLoadSelecting, /* ssid -a leaves new entries unselected; this marks them for the beacon attack */
+    WifiSpamLoadStarting, /* kicks off "attack -t beacon -l" for the window just loaded */
+    WifiSpamLoadBroadcasting, /* window is live; waiting out WIFI_SPAM_ROTATE_MS */
+    WifiSpamLoadStopping, /* stops the attack before rotating to the next window */
+    WifiSpamLoadError, /* file missing, or nothing usable in it - loader stops here */
+} WifiSpamLoadState;
+
+/* Persistent loader state, stepped a little at a time from the app's 100ms tick handler rather
+   than all at once in on_enter. File position is never stored as a byte offset list (which would
+   grow with file size) - instead each rotation re-opens the pass at the top of the file and
+   skips the lines already sent so far, so memory use stays flat no matter how large ssids.txt is. */
+typedef struct {
+    Storage* storage;
+    File* file;
+    WifiSpamLoadState state;
+
+    uint8_t chunk[512];
+    size_t chunk_len;
+    size_t chunk_pos;
+    char line_buf[256];
+    size_t line_pos;
+    bool file_eof;
+
+    int lines_to_skip;
+    int lines_skipped;
+    int window_target;
+    int window_sent;
+    int total_sent;
+    int rotation;
+    int broadcast_ticks;
+} WifiSpamLoader;
+
+static WifiSpamLoader s_loader;
+
 static void marauder_gui_scene_wifi_spam_button_callback(
     GuiButtonType result,
     InputType type,
@@ -105,13 +158,168 @@ static void marauder_gui_scene_wifi_spam_send_ssid(MarauderGuiApp* app, const ch
     marauder_uart_send_line(app->uart, cmd);
 }
 
-static void marauder_gui_scene_wifi_spam_show_progress(MarauderGuiApp* app, int total_count) {
+static void marauder_gui_scene_wifi_spam_show_loading(MarauderGuiApp* app) {
     snprintf(
         app->wifi_spam_status_label,
         sizeof(app->wifi_spam_status_label),
-        app->language == MarauderLanguageTurkish ? "Yayinlaniyor: %d" : "Broadcasting: %d",
-        total_count);
+        app->language == MarauderLanguageTurkish ? "Tur %d: %d/%d" : "Round %d: %d/%d",
+        s_loader.rotation + 1,
+        s_loader.window_sent,
+        s_loader.window_target);
     marauder_gui_scene_wifi_spam_redraw(app);
+}
+
+static void marauder_gui_scene_wifi_spam_show_broadcasting(MarauderGuiApp* app) {
+    int seconds_left = (WIFI_SPAM_ROTATE_TICKS - s_loader.broadcast_ticks) / 10;
+    if(seconds_left < 0) seconds_left = 0;
+    snprintf(
+        app->wifi_spam_status_label,
+        sizeof(app->wifi_spam_status_label),
+        app->language == MarauderLanguageTurkish ? "Tur %d: %d SSID (%ds)" : "Round %d: %d SSIDs (%ds)",
+        s_loader.rotation + 1,
+        s_loader.window_sent,
+        seconds_left);
+    marauder_gui_scene_wifi_spam_redraw(app);
+}
+
+/* Resets the chunk/line reader and seeks back to byte 0, ready to start a fresh pass over the
+   file (used both for the very first window and to wrap around once the end is reached). */
+static void marauder_gui_scene_wifi_spam_restart_pass(void) {
+    storage_file_seek(s_loader.file, 0, true);
+    s_loader.chunk_len = 0;
+    s_loader.chunk_pos = 0;
+    s_loader.line_pos = 0;
+    s_loader.file_eof = false;
+}
+
+/* Pulls the next non-empty line out of the file into s_loader.line_buf, reading in 512-byte
+   chunks so memory use never depends on file size. Returns false once the current pass has run
+   out of lines (s_loader.file_eof is then true). */
+static bool marauder_gui_scene_wifi_spam_next_line(void) {
+    while(true) {
+        if(s_loader.chunk_pos >= s_loader.chunk_len) {
+            if(s_loader.file_eof) return false;
+            s_loader.chunk_len = storage_file_read(s_loader.file, s_loader.chunk, sizeof(s_loader.chunk));
+            s_loader.chunk_pos = 0;
+            if(s_loader.chunk_len == 0) {
+                s_loader.file_eof = true;
+                /* Flush a final line that has no trailing newline */
+                if(s_loader.line_pos > 0) {
+                    s_loader.line_buf[s_loader.line_pos] = '\0';
+                    s_loader.line_pos = 0;
+                    return true;
+                }
+                return false;
+            }
+        }
+
+        uint8_t byte = s_loader.chunk[s_loader.chunk_pos++];
+        if(byte == '\n' || byte == '\r') {
+            if(s_loader.line_pos > 0) {
+                s_loader.line_buf[s_loader.line_pos] = '\0';
+                s_loader.line_pos = 0;
+                return true;
+            }
+            /* blank line - keep scanning for the next one */
+        } else if(byte >= 32 && byte < 127) {
+            if(s_loader.line_pos < sizeof(s_loader.line_buf) - 1) {
+                s_loader.line_buf[s_loader.line_pos++] = (char)byte;
+            }
+        }
+    }
+}
+
+/* Advances the window-rotation state machine by a small, bounded amount of work. Registered as
+   app->tick_handler (~100ms period) for the whole lifetime of the Random SSID scene, so no single
+   call blocks the UI thread for more than a few quick UART writes or SD reads. */
+static void marauder_gui_scene_wifi_spam_tick(MarauderGuiApp* app) {
+    switch(s_loader.state) {
+    case WifiSpamLoadSkipping: {
+        int processed = 0;
+        while(processed < WIFI_SPAM_LINES_PER_TICK && s_loader.lines_skipped < s_loader.lines_to_skip) {
+            if(!marauder_gui_scene_wifi_spam_next_line()) {
+                /* Fewer lines left than we expected to skip - just wrap back to the top */
+                marauder_gui_scene_wifi_spam_restart_pass();
+                s_loader.lines_to_skip = 0;
+                s_loader.lines_skipped = 0;
+                break;
+            }
+            s_loader.lines_skipped++;
+            processed++;
+        }
+        if(s_loader.lines_skipped >= s_loader.lines_to_skip) {
+            s_loader.window_sent = 0;
+            marauder_uart_send_line(app->uart, "clearlist -s");
+            s_loader.state = WifiSpamLoadLoading;
+        }
+        break;
+    }
+    case WifiSpamLoadLoading: {
+        int processed = 0;
+        while(processed < WIFI_SPAM_LINES_PER_TICK && s_loader.window_sent < s_loader.window_target) {
+            if(!marauder_gui_scene_wifi_spam_next_line()) break;
+            /* Skip names with '"', which can't be quoted in the "ssid -a -n" command */
+            if(strlen(s_loader.line_buf) > 0 && strchr(s_loader.line_buf, '"') == NULL) {
+                marauder_gui_scene_wifi_spam_send_ssid(app, s_loader.line_buf);
+                s_loader.window_sent++;
+                s_loader.total_sent++;
+            }
+            processed++;
+        }
+        marauder_gui_scene_wifi_spam_show_loading(app);
+        if(s_loader.window_sent >= s_loader.window_target || s_loader.file_eof) {
+            s_loader.state = WifiSpamLoadSelecting;
+        }
+        break;
+    }
+    case WifiSpamLoadSelecting:
+        if(s_loader.window_sent == 0) {
+            snprintf(
+                app->wifi_spam_status_label,
+                sizeof(app->wifi_spam_status_label),
+                app->language == MarauderLanguageTurkish ? "Kullanilabilir SSID yok!" :
+                                                            "No usable SSIDs found!");
+            marauder_gui_scene_wifi_spam_redraw(app);
+            s_loader.state = WifiSpamLoadError;
+            break;
+        }
+        /* Newly added SSIDs default to unselected; "beacon -l" only broadcasts selected ones */
+        marauder_uart_send_line(app->uart, "select -s all");
+        s_loader.state = WifiSpamLoadStarting;
+        break;
+    case WifiSpamLoadStarting:
+        marauder_uart_send_line(app->uart, "attack -t beacon -l");
+        s_loader.broadcast_ticks = 0;
+        marauder_gui_scene_wifi_spam_show_broadcasting(app);
+        s_loader.state = WifiSpamLoadBroadcasting;
+        break;
+    case WifiSpamLoadBroadcasting:
+        s_loader.broadcast_ticks++;
+        if(s_loader.broadcast_ticks % 10 == 0) {
+            marauder_gui_scene_wifi_spam_show_broadcasting(app);
+        }
+        if(s_loader.broadcast_ticks >= WIFI_SPAM_ROTATE_TICKS) {
+            s_loader.state = WifiSpamLoadStopping;
+        }
+        break;
+    case WifiSpamLoadStopping:
+        marauder_uart_send_line(app->uart, "stopscan");
+        s_loader.rotation++;
+        if(s_loader.file_eof) {
+            /* Reached the end of the file - wrap around for continuous rotation */
+            marauder_gui_scene_wifi_spam_restart_pass();
+            s_loader.lines_to_skip = 0;
+        } else {
+            s_loader.lines_to_skip += s_loader.window_sent;
+        }
+        s_loader.lines_skipped = 0;
+        s_loader.state = WifiSpamLoadSkipping;
+        break;
+    case WifiSpamLoadError:
+    case WifiSpamLoadIdle:
+    default:
+        break;
+    }
 }
 
 void marauder_gui_scene_wifi_spam_on_enter(void* context) {
@@ -123,86 +331,35 @@ void marauder_gui_scene_wifi_spam_on_enter(void* context) {
     view_dispatcher_switch_to_view(app->view_dispatcher, MarauderGuiViewWidget);
 
     if(app->wifi_spam_use_count) {
-        /* Load custom SSIDs from file and broadcast in intelligent batches */
-        Storage* storage = furi_record_open(RECORD_STORAGE);
-        File* file = storage_file_alloc(storage);
-
-        const char* ssid_file_path = EXT_PATH("apps_data/marauder_gui/ssids.txt");
+        memset(&s_loader, 0, sizeof(s_loader));
 
         snprintf(app->wifi_spam_status_label, sizeof(app->wifi_spam_status_label),
                  app->language == MarauderLanguageTurkish ? "Dosya okunuyor..." : "Reading file...");
         marauder_gui_scene_wifi_spam_redraw(app);
 
-        if(!storage_file_open(file, ssid_file_path, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        s_loader.storage = furi_record_open(RECORD_STORAGE);
+        s_loader.file = storage_file_alloc(s_loader.storage);
+
+        const char* ssid_file_path = EXT_PATH("apps_data/marauder_gui/ssids.txt");
+
+        if(!storage_file_open(s_loader.file, ssid_file_path, FSAM_READ, FSOM_OPEN_EXISTING)) {
             snprintf(app->wifi_spam_status_label, sizeof(app->wifi_spam_status_label),
                      app->language == MarauderLanguageTurkish ? "Dosya bulunamadi!" : "File not found!");
             marauder_gui_scene_wifi_spam_redraw(app);
-            storage_file_free(file);
+            storage_file_free(s_loader.file);
             furi_record_close(RECORD_STORAGE);
+            s_loader.file = NULL;
+            s_loader.storage = NULL;
             return;
         }
 
-        /* Stream SSIDs from file one line at a time, pausing after each batch */
-        static char line_buffer[256];
-        int batch_count = 0;
-        int total_count = 0;
-        int batch_size = app->wifi_spam_count;  /* Use the input as batch size */
+        int window_target = app->wifi_spam_count;
+        if(window_target > WIFI_SPAM_SAFE_WINDOW_MAX) window_target = WIFI_SPAM_SAFE_WINDOW_MAX;
+        if(window_target < 1) window_target = 1;
+        s_loader.window_target = window_target;
+        s_loader.state = WifiSpamLoadSkipping;
 
-        marauder_uart_send_line(app->uart, "clearlist -s");
-
-        /* Read the file in 512-byte chunks, so only one chunk and one line are in RAM at a time */
-        static uint8_t chunk[512];
-        size_t line_pos = 0;
-        while(true) {
-            size_t chunk_len = storage_file_read(file, chunk, sizeof(chunk));
-            bool eof = chunk_len == 0;
-            if(eof) {
-                /* End of file acts as a line break so a final line without '\n' is still sent */
-                chunk[0] = '\n';
-                chunk_len = 1;
-            }
-            for(size_t i = 0; i < chunk_len; i++) {
-                uint8_t byte = chunk[i];
-                if(byte == '\n' || byte == '\r') {
-                    if(line_pos > 0) {
-                        line_buffer[line_pos] = '\0';
-
-                        /* Skip empty lines and names with '"', which can't be quoted in the command */
-                        if(strlen(line_buffer) > 0 && strchr(line_buffer, '"') == NULL) {
-                            marauder_gui_scene_wifi_spam_send_ssid(app, line_buffer);
-                            total_count++;
-                            batch_count++;
-                            furi_delay_ms(WIFI_SPAM_SSID_GAP_MS);
-
-                            /* After each full batch, update progress and pause briefly */
-                            if(batch_count >= batch_size) {
-                                marauder_gui_scene_wifi_spam_show_progress(app, total_count);
-                                batch_count = 0;
-                                furi_delay_ms(100);
-                            }
-                        }
-                        line_pos = 0;
-                    }
-                } else if(byte >= 32 && byte < 127) {
-                    /* Printable ASCII character */
-                    if(line_pos < sizeof(line_buffer) - 1) {
-                        line_buffer[line_pos++] = (char)byte;
-                    }
-                }
-            }
-            if(eof) break;
-        }
-
-        storage_file_close(file);
-        storage_file_free(file);
-        furi_record_close(RECORD_STORAGE);
-
-        /* Start broadcasting the loaded list */
-        snprintf(app->wifi_spam_status_label, sizeof(app->wifi_spam_status_label),
-                 app->language == MarauderLanguageTurkish ? "%d SSID Yayinlaniyor" : "Broadcasting %d SSIDs",
-                 total_count);
-        marauder_gui_scene_wifi_spam_redraw(app);
-        marauder_uart_send_line(app->uart, "attack -t beacon -l");
+        app->tick_handler = marauder_gui_scene_wifi_spam_tick;
 
     } else {
         strncpy(
@@ -238,5 +395,18 @@ void marauder_gui_scene_wifi_spam_on_exit(void* context) {
     marauder_uart_send_line(app->uart, "stopscan");
 
     app->uart_line_handler = NULL;
+    app->tick_handler = NULL;
+
+    if(s_loader.file) {
+        storage_file_close(s_loader.file);
+        storage_file_free(s_loader.file);
+        s_loader.file = NULL;
+    }
+    if(s_loader.storage) {
+        furi_record_close(RECORD_STORAGE);
+        s_loader.storage = NULL;
+    }
+    s_loader.state = WifiSpamLoadIdle;
+
     widget_reset(app->widget);
 }
