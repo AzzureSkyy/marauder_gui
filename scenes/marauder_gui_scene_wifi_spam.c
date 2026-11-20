@@ -150,36 +150,44 @@ void marauder_gui_scene_wifi_spam_on_enter(void* context) {
 
         marauder_uart_send_line(app->uart, "clearlist -s");
 
-        /* Manual line reading */
-        uint8_t byte;
+        /* Read the file in 512-byte chunks, so only one chunk and one line are in RAM at a time */
+        static uint8_t chunk[512];
         size_t line_pos = 0;
         while(true) {
-            bool eof = storage_file_read(file, &byte, 1) != 1;
-            if(eof) byte = '\n';
-            if(byte == '\n' || byte == '\r') {
-                if(line_pos > 0) {
-                    line_buffer[line_pos] = '\0';
+            size_t chunk_len = storage_file_read(file, chunk, sizeof(chunk));
+            bool eof = chunk_len == 0;
+            if(eof) {
+                /* End of file acts as a line break so a final line without '\n' is still sent */
+                chunk[0] = '\n';
+                chunk_len = 1;
+            }
+            for(size_t i = 0; i < chunk_len; i++) {
+                uint8_t byte = chunk[i];
+                if(byte == '\n' || byte == '\r') {
+                    if(line_pos > 0) {
+                        line_buffer[line_pos] = '\0';
 
-                    /* Skip empty lines and names with '"', which can't be quoted in the command */
-                    if(strlen(line_buffer) > 0 && strchr(line_buffer, '"') == NULL) {
-                        marauder_gui_scene_wifi_spam_send_ssid(app, line_buffer);
-                        total_count++;
-                        batch_count++;
-                        furi_delay_ms(WIFI_SPAM_SSID_GAP_MS);
+                        /* Skip empty lines and names with '"', which can't be quoted in the command */
+                        if(strlen(line_buffer) > 0 && strchr(line_buffer, '"') == NULL) {
+                            marauder_gui_scene_wifi_spam_send_ssid(app, line_buffer);
+                            total_count++;
+                            batch_count++;
+                            furi_delay_ms(WIFI_SPAM_SSID_GAP_MS);
 
-                        /* After each full batch, update progress and pause briefly */
-                        if(batch_count >= batch_size) {
-                            marauder_gui_scene_wifi_spam_show_progress(app, total_count);
-                            batch_count = 0;
-                            furi_delay_ms(100);
+                            /* After each full batch, update progress and pause briefly */
+                            if(batch_count >= batch_size) {
+                                marauder_gui_scene_wifi_spam_show_progress(app, total_count);
+                                batch_count = 0;
+                                furi_delay_ms(100);
+                            }
                         }
+                        line_pos = 0;
                     }
-                    line_pos = 0;
-                }
-            } else if(byte >= 32 && byte < 127) {
-                /* Printable ASCII character */
-                if(line_pos < sizeof(line_buffer) - 1) {
-                    line_buffer[line_pos++] = (char)byte;
+                } else if(byte >= 32 && byte < 127) {
+                    /* Printable ASCII character */
+                    if(line_pos < sizeof(line_buffer) - 1) {
+                        line_buffer[line_pos++] = (char)byte;
+                    }
                 }
             }
             if(eof) break;

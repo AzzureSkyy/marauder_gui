@@ -55,7 +55,7 @@ apps_data/marauder_gui/ssids.txt
 - Blank lines are skipped.
 - SSIDs may contain spaces. Lines containing a double quote (") are skipped.
 
-Start it from **WiFi > WiFi Spam > Random SSID**. Enter a batch size from 1 to 500. The app sends
+The file is read in 512-byte chunks, so its size does not need to fit in memory. Start it from **WiFi > WiFi Spam > Random SSID**. Enter a batch size from 1 to 500. The app sends
 each SSID as its own `ssid -a -n "<name>"` command, which is the form the ESP32 Marauder firmware
 accepts. It pauses 20 ms between names and 100 ms after each batch. When the whole file has been
 sent, the beacon attack starts with `attack -t beacon -l`.
