@@ -19,20 +19,46 @@ static const struct {
     const char* command;
     const char* description_tr;
     const char* description_en;
+    bool uses_builtin_list; /* true = routed through the ssid -a -n/select/beacon -l pipeline
+                                (same as Random SSID, gets the lock icon) instead of a single
+                                passthrough command to the ESP32 */
 } marauder_wifi_spam_types[] = {
     {"Rastgele SSID",
      "Random SSID",
      "attack -t beacon -r",
      "ssids.txt dosyasindan SSID'leri batch halinde yayinlar.",
-     "Broadcasts SSIDs from ssids.txt in batches."},
+     "Broadcasts SSIDs from ssids.txt in batches.",
+     false},
     {"Komik Isimler",
      "Funny Names",
      "attack -t funny",
-     "Onceden tanimli esprili SSID isimleriyle sahte agler yayinlar.",
-     "Broadcasts fake networks with pre-defined joke SSID names."},
+     "Yerlesik esprili SSID isimleriyle sahte agler yayinlar (kilit simgesiyle).",
+     "Broadcasts fake networks with built-in joke SSID names (shows lock icon).",
+     true},
 };
 #define MARAUDER_WIFI_SPAM_TYPE_COUNT \
     (sizeof(marauder_wifi_spam_types) / sizeof(marauder_wifi_spam_types[0]))
+
+/* Built into the FAP itself (not read from any file), same idea as Random SSID's ssids.txt list,
+   so Funny Names goes through the exact same ssid -a -n + select -s all + attack -t beacon -l
+   pipeline and gets the same lock icon on scanning devices instead of the open/shield icon that
+   the ESP32-side "attack -t funny" command produces. */
+static const char* const marauder_funny_names[] = {
+    "Abraham Linksys",
+    "Benjamin FrankLAN",
+    "Dora the Internet Explorer",
+    "FBI Surveillance Van 4",
+    "Get Off My Lawn",
+    "Hide Yo Kids Hide Yo WiFi",
+    "IT HURTS WHEN IP",
+    "LAN Solo",
+    "Loading...",
+    "Mom Use This One",
+    "Pretty Fly for a WiFi",
+    "Virus Distribution Center",
+};
+#define MARAUDER_FUNNY_NAME_COUNT \
+    (sizeof(marauder_funny_names) / sizeof(marauder_funny_names[0]))
 
 size_t marauder_gui_wifi_spam_type_count(void) {
     return MARAUDER_WIFI_SPAM_TYPE_COUNT;
@@ -61,6 +87,12 @@ const char* marauder_gui_wifi_spam_type_description_en(size_t index) {
     return (index < MARAUDER_WIFI_SPAM_TYPE_COUNT) ?
                marauder_wifi_spam_types[index].description_en :
                "?";
+}
+
+bool marauder_gui_wifi_spam_type_uses_builtin_list(size_t index) {
+    return (index < MARAUDER_WIFI_SPAM_TYPE_COUNT) ?
+               marauder_wifi_spam_types[index].uses_builtin_list :
+               false;
 }
 
 /* ESP32 Marauder's free-heap guard (MemoryGuard.h) starts rejecting new SSID adds somewhere
@@ -100,6 +132,8 @@ typedef struct {
     Storage* storage;
     File* file;
     WifiSpamLoadState state;
+    bool use_array; /* true = pull lines from marauder_funny_names instead of a file */
+    size_t array_index;
 
     uint8_t chunk[512];
     size_t chunk_len;
@@ -185,6 +219,11 @@ static void marauder_gui_scene_wifi_spam_show_broadcasting(MarauderGuiApp* app) 
 /* Resets the chunk/line reader and seeks back to byte 0, ready to start a fresh pass over the
    file (used both for the very first window and to wrap around once the end is reached). */
 static void marauder_gui_scene_wifi_spam_restart_pass(void) {
+    if(s_loader.use_array) {
+        s_loader.array_index = 0;
+        s_loader.file_eof = false;
+        return;
+    }
     storage_file_seek(s_loader.file, 0, true);
     s_loader.chunk_len = 0;
     s_loader.chunk_pos = 0;
@@ -196,6 +235,19 @@ static void marauder_gui_scene_wifi_spam_restart_pass(void) {
    chunks so memory use never depends on file size. Returns false once the current pass has run
    out of lines (s_loader.file_eof is then true). */
 static bool marauder_gui_scene_wifi_spam_next_line(void) {
+    if(s_loader.use_array) {
+        if(s_loader.array_index >= MARAUDER_FUNNY_NAME_COUNT) {
+            s_loader.file_eof = true;
+            return false;
+        }
+        strncpy(
+            s_loader.line_buf,
+            marauder_funny_names[s_loader.array_index],
+            sizeof(s_loader.line_buf) - 1);
+        s_loader.line_buf[sizeof(s_loader.line_buf) - 1] = '\0';
+        s_loader.array_index++;
+        return true;
+    }
     while(true) {
         if(s_loader.chunk_pos >= s_loader.chunk_len) {
             if(s_loader.file_eof) return false;
@@ -358,6 +410,23 @@ void marauder_gui_scene_wifi_spam_on_enter(void* context) {
         if(window_target < 1) window_target = 1;
         s_loader.window_target = window_target;
         s_loader.state = WifiSpamLoadSkipping;
+
+        app->tick_handler = marauder_gui_scene_wifi_spam_tick;
+
+    } else if(marauder_gui_wifi_spam_type_uses_builtin_list(app->wifi_spam_type_index)) {
+        /* Funny Names (and any future built-in-list type): no file, no window-size prompt -
+           just run the whole small list through the same select/beacon -l pipeline Random SSID
+           uses, so it broadcasts with the same lock icon. */
+        memset(&s_loader, 0, sizeof(s_loader));
+        s_loader.use_array = true;
+        s_loader.window_target = MARAUDER_FUNNY_NAME_COUNT;
+        s_loader.state = WifiSpamLoadSkipping;
+
+        snprintf(
+            app->wifi_spam_status_label,
+            sizeof(app->wifi_spam_status_label),
+            app->language == MarauderLanguageTurkish ? "Baslatiliyor..." : "Starting...");
+        marauder_gui_scene_wifi_spam_redraw(app);
 
         app->tick_handler = marauder_gui_scene_wifi_spam_tick;
 
