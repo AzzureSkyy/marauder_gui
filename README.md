@@ -2,6 +2,8 @@
 
 Maurauder GUI working on this firmware esp32_marauder_v1_20_0_20261028_esp32c5devkitc1.bin for the custom tweaks made,using an IOTMUG 5 in 1 dev board with gps,433m,868m,NRF24,and,ESPC5.
 
+https://www.iotmug.com/iotmug-5-in-1-module-expansion-board-compatible-with-flipper-zero-esp32-c5-24ghz5ghz-wifi-nrf24-cc1101-433mhz868mhz-gps-sd-card-support
+
 Marauder GUI is a bilingual Flipper Zero companion application for controlling an ESP32 Marauder
 board over GPIO UART. It provides structured menus for the Marauder serial CLI, so commands do not
 need to be typed manually.
