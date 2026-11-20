@@ -1,0 +1,7 @@
+# Compiled Flipper application packages
+*.fap
+dist/
+
+# Build output
+.ufbt/
+build/
