@@ -1,5 +1,4 @@
-# Compiled Flipper application packages
-*.fap
+# Stale distribution output
 dist/
 
 # Build output
