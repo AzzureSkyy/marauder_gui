@@ -59,7 +59,7 @@ Generic file included most_common.txt bottom of repo
 Disclaimer it visually works but I haven't verified 
 if the file saves once a match hits, or how it 
 functions on approval, used on my own network as 
-intended for testing and didn't find a generated text file
+intended for testing and didn't find a generated text file,
 be cool for school Wi-Fi passwords instead of installing 
 a grabber on staff laptop left logged in,evil 
 portal will probably work better  
