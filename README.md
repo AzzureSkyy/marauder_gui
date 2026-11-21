@@ -24,7 +24,7 @@ The application does not include or modify ESP32 Marauder firmware. Wi-Fi and Bl
 are performed by the connected ESP32 board.
 
 ## Features
-
+- Added dictionary custom wordlist prober
 - Wi-Fi scanning and AP selection
 - Wi-Fi testing and beacon tools
 - Wi-Fi SSID spam from a custom SSID list (see below)
@@ -51,11 +51,15 @@ Compared with v1.1 in `docs/changelog.md`:
   The built-in page is still the default and is unchanged.
 
 ## Custom SSID list
+## Custom wordlist 
 
 Create this file on the SD card:
-
+Put wordlist txt file in folder you create called wordlist 
 ```
 apps_data/marauder_gui/ssids.txt
+apps_data/marauder_gui/wordlist
+
+
 ```
 
 - One SSID per line.
