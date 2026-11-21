@@ -24,7 +24,7 @@ The application does not include or modify ESP32 Marauder firmware. Wi-Fi and Bl
 are performed by the connected ESP32 board.
 
 ## Features
-- Added dictionary custom wordlist prober
+- Added dictionary custom wordlist prober (see below)
 - Wi-Fi scanning and AP selection
 - Wi-Fi testing and beacon tools
 - Wi-Fi SSID spam from a custom SSID list (see below)
